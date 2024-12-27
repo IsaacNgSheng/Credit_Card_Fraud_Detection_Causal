@@ -1,0 +1,346 @@
+---
+title: "project_code"
+output: html_document
+date: "2024-11-10"
+---
+
+```{r load_files, include=FALSE}
+library(dplyr)
+library(MASS)
+app_data <- read.csv("application_data.csv")
+#col_desc <- read.csv("columns_description.csv")
+#prev_app <- read.csv("previous_application.csv")
+print(colnames(app_data))
+print(head(app_data))
+print(nrow(app_data))
+```
+
+
+```{r corr-test, include=FALSE}
+# Check for non-numeric values in AMT_ANNUITY
+non_numeric_amt_annuity <- sum(is.na(as.numeric(as.character(app_data$AMT_ANNUITY))))
+
+print(paste("Non-numeric Amt_Annuity values:", non_numeric_amt_annuity))
+
+# Convert AMT_ANNUITY to numeric, removing non-numeric values
+num_app_data <- app_data %>%
+  mutate(
+    AMT_ANNUITY = as.numeric(as.character(AMT_ANNUITY))
+  )
+
+# Remove rows with missing values in AMT_ANNUITY
+num_app_data <- na.omit(num_app_data)
+
+# Select only numerical columns for the correlation matrix
+numeric_cols <- sapply(num_app_data, is.numeric)
+numeric_data <- num_app_data[, numeric_cols]
+
+# Verify AMT_ANNUITY is in numeric_data
+if (!("AMT_ANNUITY" %in% colnames(numeric_data))) {
+  stop("AMT_ANNUITY is not in the numeric data.")
+}
+
+# Compute the correlation matrix
+correlation_matrix <- cor(numeric_data, use = "complete.obs")
+
+# Extract correlation coefficients for AMT_ANNUITY
+cor_amt_annuity <- correlation_matrix["AMT_ANNUITY", ]
+
+# Find variables correlated to AMT_ANNUITY
+threshold <- 0.7
+correlated_vars <- names(which(abs(cor_amt_annuity) >= threshold))
+
+# Print the correlated variables
+print(correlated_vars)
+
+```
+
+```{r sargan-test}
+library(dplyr)
+library(AER)
+
+# Remove rows with missing values
+num_app_data <- na.omit(app_data)
+
+# First stage regression: AMT_ANNUITY ~ AMT_GOODS_PRICE
+first_stage <- lm(AMT_ANNUITY ~ AMT_GOODS_PRICE, data = num_app_data)
+summary(first_stage)
+
+# Extract the fitted values (predicted AMT_ANNUITY)
+num_app_data$predicted_AMT_ANNUITY <- fitted(first_stage)
+
+# Second stage regression: TARGET ~ predicted_AMT_ANNUITY
+second_stage <- lm(TARGET ~ predicted_AMT_ANNUITY, data = num_app_data)
+summary(second_stage)
+
+# Conduct the F-statistic test for the first stage regression
+f_statistic <- summary(first_stage)$fstatistic
+print(f_statistic)
+
+# Conduct the Sargan test for the exogeneity of the IV
+iv_model <- ivreg(TARGET ~ AMT_ANNUITY | AMT_GOODS_PRICE, data = num_app_data)
+sargan_test <- summary(iv_model, diagnostics = TRUE)$diagnostics
+print(sargan_test)
+
+```
+
+```{r overidentification}
+# Convert AMT_ANNUITY, AMT_GOODS_PRICE, AMT_CREDIT, and TARGET to numeric
+df_app_data <- app_data %>%
+  mutate(
+    AMT_ANNUITY = as.numeric(as.character(AMT_ANNUITY)),
+    AMT_GOODS_PRICE = as.numeric(as.character(AMT_GOODS_PRICE)),
+    AMT_CREDIT = as.numeric(as.character(AMT_CREDIT)),
+    TARGET = as.numeric(as.character(TARGET))
+  )
+
+# Remove rows with missing values in AMT_ANNUITY, AMT_GOODS_PRICE, AMT_CREDIT, and TARGET
+clean_app_data <- na.omit(df_app_data)
+
+# First stage regression: AMT_ANNUITY ~ AMT_GOODS_PRICE + AMT_CREDIT
+first_stage <- lm(AMT_ANNUITY ~ AMT_GOODS_PRICE + AMT_CREDIT, data = clean_app_data)
+summary(first_stage)
+
+# Extract the fitted values (predicted AMT_ANNUITY)
+clean_app_data$predicted_AMT_ANNUITY <- fitted(first_stage)
+
+# Second stage regression: TARGET ~ predicted_AMT_ANNUITY
+second_stage <- lm(TARGET ~ predicted_AMT_ANNUITY, data = clean_app_data)
+summary(second_stage)
+
+# Conduct the F-statistic test for the first stage regression
+f_statistic <- summary(first_stage)$fstatistic
+print(f_statistic)
+
+# Conduct the IV regression and extract diagnostics
+iv_model <- ivreg(TARGET ~ AMT_ANNUITY | AMT_GOODS_PRICE + AMT_CREDIT, data = clean_app_data)
+sargan_test <- summary(iv_model, diagnostics = TRUE)
+
+# Extract the statistics from the diagnostics
+weak_instruments_stat <- sargan_test$diagnostics["Weak instruments", "statistic"]
+weak_instruments_pvalue <- sargan_test$diagnostics["Weak instruments", "p-value"]
+
+wu_hausman_stat <- sargan_test$diagnostics["Wu-Hausman", "statistic"]
+wu_hausman_pvalue <- sargan_test$diagnostics["Wu-Hausman", "p-value"]
+
+sargan_stat <- sargan_test$diagnostics["Sargan", "statistic"]
+df_sargan <- 2 - 1  # Number of instruments - Number of endogenous regressors = 1
+p_value_sargan <- pchisq(sargan_stat, df_sargan, lower.tail = FALSE)
+
+# Print all test results
+test_results <- data.frame(
+  Test = c("Weak Instruments", "Wu-Hausman", "Sargan"),
+  df1 = c(2, 1, df_sargan),
+  Statistic = c(weak_instruments_stat, wu_hausman_stat, sargan_stat),
+  p_value = c(weak_instruments_pvalue, wu_hausman_pvalue, p_value_sargan)
+)
+
+print(test_results)
+
+```
+
+```{r causal-forest}
+library(dplyr)
+library(AER)
+library(grf)
+
+# Convert AMT_ANNUITY, AMT_GOODS_PRICE, AMT_CREDIT, and TARGET to numeric
+forest_app_data <- app_data %>%
+  mutate(
+    AMT_ANNUITY = as.numeric(as.character(AMT_ANNUITY)),
+    AMT_GOODS_PRICE = as.numeric(as.character(AMT_GOODS_PRICE)),
+    TARGET = as.numeric(as.character(TARGET))
+  )
+
+# Remove rows with missing values in AMT_ANNUITY, AMT_GOODS_PRICE, and TARGET
+clean_app_data <- na.omit(forest_app_data)
+
+# First stage regression: AMT_ANNUITY ~ AMT_GOODS_PRICE
+first_stage <- lm(AMT_ANNUITY ~ AMT_GOODS_PRICE, data = clean_app_data)
+summary(first_stage)
+
+# Extract the fitted values (predicted AMT_ANNUITY)
+clean_app_data$predicted_AMT_ANNUITY <- fitted(first_stage)
+
+# Identify columns with only one unique value and remove them
+unique_counts <- sapply(clean_app_data, function(col) length(unique(col)))
+columns_to_keep <- names(unique_counts[unique_counts > 1])
+X <- clean_app_data[, columns_to_keep]
+X <- X[, !(names(X) %in% c("TARGET", "AMT_ANNUITY"))]
+
+# Convert all features to numeric using model.matrix
+X <- model.matrix(~ . - 1, data = X)
+
+# Fit a causal forest model
+causal_forest <- grf::causal_forest(
+  X = X,
+  Y = clean_app_data$TARGET,
+  W = clean_app_data$predicted_AMT_ANNUITY
+)
+
+# Summarize the causal forest results
+summary(causal_forest)
+
+```
+
+```{r plot-forest}
+# Plot the distribution of treatment effects
+treatment_effects <- causal_forest$predictions
+hist(treatment_effects, breaks = 50, main = "Distribution of Treatment Effects", xlab = "Estimated Treatment Effects")
+
+# Extract the variable importance scores
+variable_importance <- grf::variable_importance(causal_forest)
+
+# Get the variable names from the dataset
+variable_names <- colnames(X)
+
+# Create a data frame to see the variable names alongside their importance scores
+variable_importance_df <- data.frame(
+  Variable = variable_names,
+  Importance = variable_importance
+)
+
+# Sort the data frame by importance scores in descending order
+variable_importance_df <- variable_importance_df[order(-variable_importance_df$Importance), ]
+
+# Print the data frame
+print(variable_importance_df)
+
+```
+
+```{r ATE}
+# Calculate the Average Treatment Effect (ATE)
+ate <- average_treatment_effect(causal_forest)
+print(ate)
+
+```
+
+```{r counterfactual}
+# Predict treatment effects for each observation
+treatment_effects <- predict(causal_forest)$predictions
+
+# Predict counterfactual outcomes
+# Define a function to calculate counterfactual outcomes
+predict_counterfactuals <- function(forest, X, W, Y, treatment_delta) {
+  # Get the predicted treatment effect for each observation
+  treatment_effects <- predict(forest)$predictions
+  
+  # Calculate the counterfactual outcomes
+  Y_cf <- Y + treatment_effects * treatment_delta
+  
+  return(Y_cf)
+}
+
+# Calculate counterfactual outcomes for doubling AMT_ANNUITY
+treatment_delta_double <- 2 * mean(clean_app_data$predicted_AMT_ANNUITY)
+counterfactual_outcomes_double <- predict_counterfactuals(
+  causal_forest,
+  X,
+  clean_app_data$predicted_AMT_ANNUITY,
+  clean_app_data$TARGET,
+  treatment_delta_double
+)
+
+# Create a data frame with actual outcomes, counterfactual outcomes, AMT_INCOME_TOTAL, and AMT_ANNUITY
+comparison_df <- data.frame(
+  Actual = clean_app_data$TARGET,
+  Counterfactual = counterfactual_outcomes_double,
+  AMT_INCOME_TOTAL = clean_app_data$AMT_INCOME_TOTAL,
+  AMT_ANNUITY = clean_app_data$AMT_ANNUITY
+)
+
+# Inspect the comparison
+head(comparison_df)
+
+# Create a subset with 3 TARGET = 1 and 3 TARGET = 0
+subset_df <- bind_rows(
+  head(subset(comparison_df, Actual == 1), 3),
+  head(subset(comparison_df, Actual == 0), 3)
+)
+
+# Print the subset for inspection
+print(subset_df)
+
+```
+
+```{r ate-pure-iv}
+# Conduct the IV regression
+iv_model <- ivreg(TARGET ~ AMT_ANNUITY | AMT_GOODS_PRICE, data = clean_app_data)
+
+# Extract the ATE from the IV model
+ate_iv <- summary(iv_model)$coefficients["AMT_ANNUITY", "Estimate"]
+std_err_iv <- summary(iv_model)$coefficients["AMT_ANNUITY", "Std. Error"]
+
+# Print the ATE and standard error
+cat("ATE (IV):", ate_iv, "\nStandard Error (IV):", std_err_iv, "\n")
+
+```
+
+```{r subgroup-importance}
+library(ggplot2)
+library(dplyr)
+# Create a data frame with variable names and their importance scores
+variable_importance_df <- data.frame(
+  Variable = variable_names,
+  Importance = variable_importance
+)
+
+# Sort the data frame by importance scores in descending order
+variable_importance_df <- variable_importance_df %>%
+  arrange(desc(Importance)) %>%
+  mutate(Variable = factor(Variable, levels = Variable))
+
+# Limit to top N variables for better visualization (e.g., top 20)
+top_n <- 20
+variable_importance_df_top_n <- head(variable_importance_df, top_n)
+print(variable_importance_df_top_n)
+
+# Plot the top N important variables using ggplot2
+ggplot(variable_importance_df_top_n, aes(x = Variable, y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  
+  labs(title = paste("Top", top_n, "Important Variables"),
+       x = "Variables",
+       y = "Importance") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5))
+
+```
+```{r corr-test-IV}
+# Check for non-numeric values in AMT_ANNUITY
+non_numeric_amt_goods_price <- sum(is.na(as.numeric(as.character(app_data$AMT_GOODS_PRICE))))
+
+print(paste("Non-numeric Amt_Goods_Price values:", non_numeric_amt_goods_price))
+
+# Convert AMT_GOODS_PRICE to numeric, removing non-numeric values
+num_app_data <- app_data %>%
+  mutate(
+    AMT_GOODS_PRICE = as.numeric(as.character(AMT_GOODS_PRICE))
+  )
+
+# Remove rows with missing values in AMT_ANNUITY
+num_app_data <- na.omit(num_app_data)
+
+# Select only numerical columns for the correlation matrix
+numeric_cols <- sapply(num_app_data, is.numeric)
+numeric_data <- num_app_data[, numeric_cols]
+
+# Verify AMT_ANNUITY is in numeric_data
+if (!("AMT_GOODS_PRICE" %in% colnames(numeric_data))) {
+  stop("AMT_GOODS_PRICE is not in the numeric data.")
+}
+
+# Compute the correlation matrix
+correlation_matrix <- cor(numeric_data, use = "complete.obs")
+
+# Extract correlation coefficients for AMT_GOODS_PRICE
+cor_amt_goods_price <- correlation_matrix["AMT_GOODS_PRICE", ]
+
+# Find variables correlated to AMT_GOODS_PRICE
+threshold <- 0.7
+correlated_vars <- names(which(abs(cor_amt_goods_price) >= threshold))
+
+# Print the correlated variables
+print(correlated_vars)
+```

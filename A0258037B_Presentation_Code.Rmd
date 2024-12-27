@@ -1,0 +1,274 @@
+---
+title: "Credit_Card_Fraud_Detection_Code"
+output: html_document
+date: "2024-11-10"
+---
+
+```{r load_files, include=FALSE}
+library(dplyr)
+library(MASS)
+app_data <- read.csv("application_data.csv")
+#col_desc <- read.csv("columns_description.csv")
+#prev_app <- read.csv("previous_application.csv")
+print(colnames(app_data))
+print(head(app_data))
+print(nrow(app_data))
+```
+
+
+```{r EDA, include=FALSE}
+# List of columns to keep
+selected_columns <- c("TARGET", "CODE_GENDER", "AMT_INCOME_TOTAL", 
+                      "AMT_CREDIT", "AMT_ANNUITY", "NAME_CONTRACT_TYPE", 
+                      "NAME_INCOME_TYPE", "NAME_EDUCATION_TYPE", 
+                      "NAME_FAMILY_STATUS", "OCCUPATION_TYPE", 
+                      "DAYS_BIRTH", "DAYS_EMPLOYED", "EXT_SOURCE_1", 
+                      "EXT_SOURCE_2", "EXT_SOURCE_3", "REGION_POPULATION_RELATIVE")
+# "CNT_CHILDREN" to be used as IV afterwards
+
+# Subset the data
+app_data_sel <- app_data[, selected_columns]
+
+# Print the first few rows of the filtered data
+print(head(app_data_sel))
+
+```
+
+```{r stepwise}
+# Handle categorical variables
+app_data_sel_cat <- app_data_sel %>%
+  mutate(across(where(is.character), as.factor))
+
+# Remove rows with missing values
+app_data_sel_om <- na.omit(app_data_sel_cat)
+
+# Specify the full model and null model
+full_model <- lm(TARGET ~ ., data = app_data_sel_om)
+null_model <- lm(TARGET ~ 1, data = app_data_sel_om)
+
+# Perform stepwise model selection
+stepwise_model <- step(null_model, 
+                       scope = list(lower = null_model, upper = full_model), 
+                       direction = "both")
+
+# Summary of the stepwise selected model
+summary(stepwise_model)
+
+```
+
+```{r verify-multicollinearity}
+library(car)
+library(glmnet)
+# Check for multicollinearity using VIF 
+vif_values <- vif(stepwise_model)
+print(vif_values)
+
+# Check for multicollinearity using correlation matrix 
+cor_matrix <- cor(app_data_sel_om[, sapply(app_data_sel_om, is.numeric)])
+print(cor_matrix)
+
+# Check for multicollinearity using eigenvalues and condition index
+eigen_values <- eigen(cor(app_data_sel_om[, sapply(app_data_sel_om, is.numeric)]))$values
+condition_index <- sqrt(max(eigen_values) / eigen_values)
+print(condition_index)
+
+#DAYS_EMPLOYED has high multicollinearity, would consider removing it, whereas NAME_INCOME_TYPE has moderate multicollinearity
+
+# Remove multicollinear data
+non_multicollinear_data <- c("EXT_SOURCE_3", "EXT_SOURCE_2", "EXT_SOURCE_1", "DAYS_BIRTH", "NAME_CONTRACT_TYPE", "NAME_EDUCATION_TYPE", "OCCUPATION_TYPE", "AMT_ANNUITY", "AMT_CREDIT", "NAME_INCOME_TYPE", "AMT_INCOME_TOTAL", "NAME_FAMILY_STATUS")
+app_data_multicol <- app_data_sel_om[, non_multicollinear_data]
+head(app_data_multicol)
+```
+
+```{r verify-correlation}
+# Convert factors to one-hot encoded variables for categorical data
+app_data_multicol_numeric <- model.matrix(~ . - 1, data = app_data_multicol)
+
+# Calculate the correlation matrix for numerical variables
+cor_matrix_multicol <- cor(app_data_multicol_numeric, use = "complete.obs")
+
+# Extract correlations of AMT_CREDIT with other variables
+amt_annuity_correlations <- cor_matrix_multicol["AMT_ANNUITY", ]
+
+# Print the correlations
+print(amt_annuity_correlations)
+
+#Amt_Credit is the only variable that is strongly correlated, having a correlation coefficient of 0.77398, which is > 0.7
+#All other variables are weakly correlated, being less than 0.3 in magnitude
+```
+
+```{r IV}
+#Other unobservable confounders are present such as Creditworthiness' Perception, 
+# Load necessary libraries
+library(dplyr)
+library(MASS)
+library(AER)
+
+# Ensure the necessary data is ready
+head(app_data_multicol)
+
+# Manually add CNT_CHILDREN to the multicollinearity dataset
+app_data_iv <- app_data[c("TARGET", "AMT_CREDIT", "AMT_ANNUITY", "CNT_CHILDREN")]
+
+# Verify the new dataset
+head(app_data_iv)
+
+# Fit the updated regression model controlling for AMT_ANNUITY
+updated_model <- lm(TARGET ~ AMT_ANNUITY + AMT_CREDIT, data = app_data_iv)
+
+# Summary of the updated model
+summary(updated_model)
+
+# Perform IV regression using CNT_CHILDREN as the instrument for AMT_CREDIT
+iv_model <- ivreg(TARGET ~ AMT_ANNUITY + AMT_CREDIT | CNT_CHILDREN + AMT_CREDIT, data = app_data_iv)
+
+# Summary of the IV model
+summary(iv_model)
+```
+
+```{r f-statistic-iv-validity}
+# Load necessary libraries
+library(dplyr)
+library(MASS)
+library(AER)
+
+# Ensure the necessary data is ready
+head(app_data_multicol)
+
+# Manually add CNT_CHILDREN to the multicollinearity dataset
+app_data_iv <- app_data[c("TARGET", "AMT_CREDIT", "AMT_ANNUITY", "CNT_CHILDREN")]
+
+# Verify the new dataset
+head(app_data_iv)
+
+# First stage regression: AMT_ANNUITY on CNT_CHILDREN and AMT_CREDIT
+first_stage_annuity <- lm(AMT_ANNUITY ~ CNT_CHILDREN + AMT_CREDIT, data = app_data_iv)
+
+# Summary of the first stage regression to get the F-statistic
+first_stage_annuity_summary <- summary(first_stage_annuity)
+print(first_stage_annuity_summary)
+
+# Extract the F-statistic from the first stage regression
+first_stage_f_stat_annuity <- first_stage_annuity_summary$fstatistic
+f_value_annuity <- first_stage_f_stat_annuity[1]  # The F-statistic value
+
+# Print the F-statistic
+cat("F-statistic from the first stage regression (AMT_ANNUITY as DV): ", f_value_annuity, "\n")
+
+# Fit the updated regression model controlling for AMT_CREDIT
+updated_model_annuity <- lm(TARGET ~ AMT_ANNUITY + AMT_CREDIT, data = app_data_iv)
+
+# Summary of the updated model
+summary(updated_model_annuity)
+
+# Perform IV regression using CNT_CHILDREN as the instrument for AMT_ANNUITY
+iv_model_annuity <- ivreg(TARGET ~ AMT_ANNUITY + AMT_CREDIT | CNT_CHILDREN + AMT_CREDIT, data = app_data_iv)
+
+# Summary of the IV model
+summary(iv_model_annuity)
+
+#F-Stat of AMT_ANNUITY is higher at 224477.3
+```
+
+```{r IV-Validity}
+# Ensure necessary data is ready
+head(app_data_iv)
+
+# Calculate the correlation between CNT_CHILDREN and AMT_CREDIT
+cor_amt_credit <- cor(app_data_iv$CNT_CHILDREN, app_data_iv$AMT_CREDIT, use = "complete.obs")
+
+# Calculate the correlation between CNT_CHILDREN and AMT_ANNUITY
+cor_amt_annuity <- cor(app_data_iv$CNT_CHILDREN, app_data_iv$AMT_ANNUITY, use = "complete.obs")
+
+# Print the correlation results
+cat("Correlation between CNT_CHILDREN and AMT_CREDIT: ", cor_amt_credit, "\n")
+cat("Correlation between CNT_CHILDREN and AMT_ANNUITY: ", cor_amt_annuity, "\n")
+
+```
+
+```{r IV-Test}
+# Load necessary libraries
+library(MASS)
+library(AER)
+library(lmtest)
+
+# Ensure the necessary data is ready
+head(app_data)
+
+# Manually create the subset of the data
+app_data_test <- app_data[, c("TARGET", "AMT_CREDIT", "AMT_ANNUITY", "CNT_CHILDREN", "NAME_INCOME_TYPE", "REGION_POPULATION_RELATIVE", "OCCUPATION_TYPE")]
+
+# Ensure the dataset is correctly loaded
+print(head(app_data_test))
+
+# First stage regression: Combined IVs approach
+first_stage_combined <- lm(AMT_ANNUITY ~ CNT_CHILDREN + NAME_INCOME_TYPE + REGION_POPULATION_RELATIVE + OCCUPATION_TYPE + AMT_CREDIT, data = app_data_test)
+
+# Summary of the first stage regression to get the F-statistic
+first_stage_summary_combined <- summary(first_stage_combined)
+print(first_stage_summary_combined)
+
+# Extract the F-statistic from the first stage regression
+first_stage_f_stat_combined <- first_stage_summary_combined$fstatistic
+f_value_combined <- first_stage_f_stat_combined[1]  # The F-statistic value
+
+# Print the F-statistic
+cat("F-statistic from the combined first stage regression: ", f_value_combined, "\n")
+
+# Fit the updated regression model controlling for combined IVs
+updated_model_combined <- lm(TARGET ~ AMT_ANNUITY + AMT_CREDIT + CNT_CHILDREN + NAME_INCOME_TYPE + REGION_POPULATION_RELATIVE + OCCUPATION_TYPE, data = app_data_test)
+
+# Summary of the updated model
+summary(updated_model_combined)
+
+# Perform IV regression using combined IVs for AMT_ANNUITY
+iv_model_combined <- ivreg(TARGET ~ AMT_ANNUITY + AMT_CREDIT | CNT_CHILDREN + NAME_INCOME_TYPE + REGION_POPULATION_RELATIVE + OCCUPATION_TYPE + AMT_CREDIT, data = app_data_test)
+
+# Summary of the IV model with diagnostics
+iv_summary_combined <- summary(iv_model_combined, diagnostics = TRUE)
+
+# Perform the Sargan-Hansen overidentification test
+sargan_test <- summary(iv_model_combined, diagnostics = TRUE)$diagnostics
+print(sargan_test)
+
+# Perform IV regression using combined IVs for AMT_ANNUITY with robust standard errors
+iv_model_combined_robust <- ivreg(TARGET ~ AMT_ANNUITY + AMT_CREDIT | CNT_CHILDREN + NAME_INCOME_TYPE + REGION_POPULATION_RELATIVE + OCCUPATION_TYPE + AMT_CREDIT, data = app_data_test)
+
+# Summary of the IV model with robust standard errors
+iv_summary_combined_robust <- coeftest(iv_model_combined_robust, vcov = vcovHC(iv_model_combined_robust, type = "HC1"))
+
+# Print the summary of the IV model with robust standard errors
+print(iv_summary_combined_robust)
+
+```
+```{r counterfactual}
+# Create a new data frame with counterfactual values
+# Estimate the counterfactual if AMT_ANNUITY was doubled
+counterfactual_data <- app_data_test
+counterfactual_data$AMT_ANNUITY <- 2 * app_data_test$AMT_ANNUITY
+
+# Predict the counterfactual TARGET using the IV model
+counterfactual_predictions <- predict(iv_model_combined, newdata = counterfactual_data)
+
+# Compare counterfactual predictions with actual values
+comparison <- data.frame(
+  Actual_TARGET = app_data_test$TARGET,
+  Counterfactual_TARGET = counterfactual_predictions
+)
+
+# View the comparison
+head(comparison)
+
+```
+```{r ob1}
+# Extract the relevant variables for the first observation
+app_data_test$AMT_INCOME_TOTAL <- app_data$AMT_INCOME_TOTAL
+observation_1_income_type <- app_data_test$NAME_INCOME_TYPE[1]
+observation_1_amt_annuity <- app_data_test$AMT_ANNUITY[1]
+observation_1_income_total <- app_data_test$AMT_INCOME_TOTAL[1]
+
+# Print the results
+cat("Income Type for Observation 1:", observation_1_income_type, "\n")And 
+cat("AMT_ANNUITY for Observation 1:", observation_1_amt_annuity, "\n")
+cat("AMT_INCOME_TOTAL for Observation 1:", observation_1_income_total, "\n")
+```
